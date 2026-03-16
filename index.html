@@ -125,7 +125,7 @@
       <div class="card-inner" id="cardInner">
         <div class="card-face card-back">
           <div class="card-back-title">TU CARTA</div>
-          <div class="tap-hint">TOCA PARA REVELAR</div>
+          <div class="tap-hint">ESPERANDO INICIO...</div>
         </div>
         <div class="card-face card-front">
           <img id="cardImage" src="" alt="carta">
@@ -134,31 +134,9 @@
     </div>
     <div class="role-label" id="roleLabel"></div>
     <div class="card-hint" id="cardHint"></div>
-    <button id="newGameBtn" onclick="voteNewGame()">🔄 NUEVA PARTIDA</button>
-    <div id="readyCount"></div>
-  </div>
-
-  <!-- ANFITRIÓN: sala de espera -->
-  <div id="screen-wait">
-    <div class="wait-title">SALA DE ESPERA</div>
-    <div class="wait-sub">Comparte el enlace con los jugadores</div>
-    <div class="count-big" id="waitCount">1</div>
-    <div class="count-label">JUGADORES CONECTADOS</div>
-    <div class="players-grid" id="playersList"></div>
-    <div class="btn-row">
-      <button class="btn btn-start" id="startBtn" onclick="startGame()" disabled>INICIAR JUEGO</button>
-      <button class="btn btn-reset" onclick="resetGame()">REINICIAR SALA</button>
-    </div>
-    <div class="min-note" id="minNote">Mínimo 2 jugadores</div>
-  </div>
-
-  <!-- NO ANFITRIÓN: espera inicio -->
-  <div id="screen-nonhost">
-    <div class="wait-title">ESPERANDO...</div>
-    <div class="wait-sub">El anfitrión iniciará el juego</div>
-    <div class="count-big" id="waitCountNH">1</div>
-    <div class="count-label">JUGADORES CONECTADOS</div>
-    <div class="players-grid" id="playersListNH"></div>
+    <div id="playerCounter" style="margin-top:12px;font-size:11px;letter-spacing:2px;color:rgba(255,255,255,0.35);text-transform:uppercase;z-index:1;"></div>
+    <button class="btn btn-start" id="startBtn" onclick="startGame()" style="display:none;margin-top:18px;">INICIAR</button>
+    <button id="newGameBtn" onclick="newGame()" style="display:none;margin-top:18px;padding:14px 32px;border-radius:50px;border:none;font-family:'Bebas Neue',sans-serif;font-size:20px;letter-spacing:3px;cursor:pointer;background:var(--teal);color:#1c1410;box-shadow:0 4px 24px rgba(94,207,190,0.35);z-index:1;">🔄 NUEVA PARTIDA</button>
   </div>
 
   <script type="module">
@@ -187,12 +165,8 @@
     if (!myId) { myId = 'p' + Date.now() + Math.random().toString(36).slice(2,5); sessionStorage.setItem('myId', myId); }
 
     let isHost = false;
-    let currentRound = null;   // número de ronda que tenemos procesada
-    let cardFlipped = false;   // si ya volteamos la carta esta ronda
-    let votedNewGame = false;
-    let totalPlayers = 0;
-    let launchGuard = false;   // evita doble launchNewRound
     let cardAssigned = false;
+    let revealed = false;
 
     // --- Arranque ---
     async function init() {
@@ -200,265 +174,162 @@
       const snap = await get(roomRef);
       let room = snap.val();
 
-      // Sala expirada o vacía → crear nueva
-      if (!room || (!room.started && Date.now() - (room.createdAt || 0) > 14400000)) {
+      // Sala expirada (más de 4h sin actividad) → limpiar
+      if (room && Date.now() - (room.createdAt || 0) > 14400000) {
         room = null;
       }
 
       if (!room) {
+        // Primer jugador → crear sala y asignarse carta
         isHost = true;
+        const civilCard = Math.floor(Math.random() * 9);
         await set(roomRef, {
-          hostId: myId, started: false, createdAt: Date.now(),
-          players: { [myId]: { joinedAt: Date.now(), num: 1 } }
+          hostId: myId,
+          createdAt: Date.now(),
+          revealed: false,
+          civilCard,
+          players: { [myId]: { joinedAt: Date.now() } }
         });
       } else {
         isHost = (room.hostId === myId);
-        // Registrarse como jugador siempre que no estemos ya (tanto en espera como en curso)
+        // Registrarse si no estamos ya
         if (!room.players || !room.players[myId]) {
-          const n = Object.keys(room.players || {}).length + 1;
-          await update(ref(db, ROOM + '/players/' + myId), { joinedAt: Date.now(), num: n });
+          await update(ref(db, ROOM + '/players/' + myId), { joinedAt: Date.now() });
         }
       }
 
-      // ÚNICO listener para todo
+      // Listener único
       onValue(roomRef, (snap) => {
         const data = snap.val();
         if (!data) { location.reload(); return; }
-        totalPlayers = Object.keys(data.players || {}).length;
+
         isHost = (data.hostId === myId);
+        const playerCount = Object.keys(data.players || {}).length;
 
-        if (!data.started) {
-          // --- SALA DE ESPERA ---
-          resetCardUI();
-          currentRound = null;
-          cardFlipped = false;
-          votedNewGame = false;
-          launchGuard = false;
-          sessionStorage.removeItem('cardState');
-          renderPlayers(data);
-          showWaitScreen();
+        // Asignar carta si aún no lo hemos hecho
+        if (!cardAssigned && data.civilCard !== undefined) {
+          assignCard(data, playerCount);
+        }
 
-        } else {
-          // --- JUEGO EN CURSO ---
-          hideWaitScreens();
-          const incomingRound = data.round || 1;
+        // Revelar cartas si el host pulsó Iniciar
+        if (data.revealed && !revealed) {
+          revealed = true;
+          flipCard(data);
+        }
 
-          if (incomingRound !== currentRound) {
-            // Nueva ronda detectada → resetear UI y asignar carta
-            currentRound = incomingRound;
-            cardFlipped = false;
-            votedNewGame = false;
-            launchGuard = false;
-            sessionStorage.removeItem('cardState');
-            resetCardUI();
-            // Solo asignar si tenemos carta (puede que seamos nuevos y aún no estemos en assignments)
-            if (data.assignments && data.assignments[myId]) {
-              assignCard(data);
-            } else {
-              // Jugador nuevo que se unió cuando la partida ya corría
-              showLateJoinMessage();
-            }
+        // Botón Iniciar: solo visible para el host, solo si las cartas no están reveladas
+        const startBtn = document.getElementById('startBtn');
+        if (startBtn) {
+          startBtn.style.display = (isHost && !data.revealed) ? 'block' : 'none';
+          startBtn.textContent = 'INICIAR (' + playerCount + ' ' + (playerCount === 1 ? 'jugador' : 'jugadores') + ')';
+        }
 
-          } else {
-            // Misma ronda → por si acaba de cargar la página (reload/volver de ecogeo)
-            // Solo asignar si la imagen no está puesta todavía
-            const img = document.getElementById('cardImage');
-            if (!img.src || img.src === window.location.href) {
-              if (data.assignments && data.assignments[myId]) {
-                assignCard(data);
-              } else {
-                showLateJoinMessage();
-              }
-            }
-          }
+        // Botón Nueva Partida: solo visible para el host tras revelar
+        const newGameBtn = document.getElementById('newGameBtn');
+        if (newGameBtn) {
+          newGameBtn.style.display = (isHost && data.revealed) ? 'block' : 'none';
+        }
 
-          // Actualizar contador de votos
-          const votes = Object.keys(data.newGameVotes || {}).length;
-          const rcEl = document.getElementById('readyCount');
-          if (rcEl.classList.contains('show')) {
-            rcEl.textContent = votes + ' / ' + totalPlayers + ' LISTOS';
-          }
+        // Contador de jugadores visible siempre mientras no se haya revelado
+        const counter = document.getElementById('playerCounter');
+        if (counter) {
+          counter.textContent = playerCount + (playerCount === 1 ? ' jugador conectado' : ' jugadores conectados');
+          counter.style.display = data.revealed ? 'none' : 'block';
+        }
 
-          // Todos votaron → host lanza nueva ronda (mínimo 2 jugadores)
-          if (votes >= totalPlayers && totalPlayers >= 2 && isHost && !launchGuard) {
-            launchGuard = true;
-            launchNewRound();
+        // Detectar reset de nueva partida: si revealed vuelve a false, resetear UI local
+        if (!data.revealed && revealed) {
+          revealed = false;
+          cardAssigned = false;
+          const inner = document.getElementById('cardInner');
+          inner.classList.remove('flipped');
+          document.getElementById('roleLabel').className = 'role-label';
+          document.getElementById('roleLabel').classList.remove('show');
+          document.getElementById('cardHint').classList.remove('show');
+          document.getElementById('newGameBtn').style.display = 'none';
+          // Reasignar carta (boca abajo)
+          if (data.civilCard !== undefined) {
+            cardAssigned = true;
           }
         }
       });
     }
 
-    function showLateJoinMessage() {
-      // Jugador que se une cuando la partida ya ha comenzado, espera a la próxima ronda
-      document.getElementById('cardHint').textContent = 'Espera la siguiente ronda';
-      document.getElementById('cardHint').classList.add('show');
-      document.getElementById('roleLabel').textContent = '⏳ PARTIDA EN CURSO';
-      document.getElementById('roleLabel').className = 'role-label civil show';
+    function assignCard(data, playerCount) {
+      cardAssigned = true;
+      // Determinar rol: impostor si myId está en la lista de impostores
+      // En esta nueva lógica todos son civiles hasta que el host pulse Iniciar,
+      // momento en que se asigna el impostor. La carta ya está asignada de antemano
+      // usando el civilCard de la sala. El impostor se decide al pulsar Iniciar.
+      // Por ahora mostrar carta boca abajo (la imagen se pondrá al revelar)
+      document.getElementById('cardImage').src = '';
     }
 
-    function assignCard(room) {
-      const assignments = room.assignments || {};
-      const role = assignments[myId] || 'civil';
-      const cardIdx = role === 'impostor' ? 9 : (room.civilCard ?? 0);
+    function flipCard(data) {
+      const role = (data.impostorId === myId) ? 'impostor' : 'civil';
+      const cardIdx = role === 'impostor' ? 9 : (data.civilCard ?? 0);
 
       document.getElementById('cardImage').src = CARDS[cardIdx];
-      document.getElementById('roleLabel').textContent = role === 'impostor' ? '⚠️ ERES EL IMPOSTOR' : '✅ ERES CIVIL';
-      document.getElementById('roleLabel').className = 'role-label ' + role;
-      cardAssigned = true;
 
-      // ¿Volvieron de ecogeo esta misma ronda?
-      try {
-        const saved = JSON.parse(sessionStorage.getItem('cardState') || 'null');
-        if (saved && saved.round === currentRound) {
-          cardFlipped = true;
-          const inner = document.getElementById('cardInner');
-          inner.style.transition = 'none';
-          inner.classList.add('flipped');
-          requestAnimationFrame(() => { inner.style.transition = ''; });
-          document.getElementById('roleLabel').classList.add('show');
-          document.getElementById('cardHint').classList.add('show');
-          document.getElementById('cardHint').textContent = 'Toca para volver a ECOGEO';
-          showNewGameBtn();
-          return;
-        }
-      } catch(e) {}
-    }
+      const inner = document.getElementById('cardInner');
+      inner.classList.add('flipped');
 
-    // --- UI helpers ---
-    function showWaitScreen() {
-      if (isHost) {
-        document.getElementById('screen-wait').classList.add('active');
-        document.getElementById('screen-nonhost').classList.remove('active');
-      } else {
-        document.getElementById('screen-wait').classList.remove('active');
-        document.getElementById('screen-nonhost').classList.add('active');
-      }
-    }
-    function hideWaitScreens() {
-      document.getElementById('screen-wait').classList.remove('active');
-      document.getElementById('screen-nonhost').classList.remove('active');
-    }
-    function showNewGameBtn() {
-      if (!votedNewGame) {
+      setTimeout(() => {
+        const label = document.getElementById('roleLabel');
+        label.textContent = role === 'impostor' ? '⚠️ ERES EL IMPOSTOR' : '✅ ERES CIVIL';
+        label.className = 'role-label ' + role;
+        label.classList.add('show');
+
+        const hint = document.getElementById('cardHint');
+        hint.textContent = 'Toca para ir a ECOGEO';
+        hint.classList.add('show');
+
+        // Mostrar botón nueva partida
         const btn = document.getElementById('newGameBtn');
         btn.classList.add('show');
-        btn.disabled = false;
-        btn.textContent = '🔄 NUEVA PARTIDA';
-      }
-      document.getElementById('readyCount').classList.add('show');
-    }
-    function resetCardUI() {
-      cardAssigned = false;
-      document.getElementById('cardInner').classList.remove('flipped');
-      document.getElementById('cardImage').src = '';
-      document.getElementById('roleLabel').className = 'role-label';
-      document.getElementById('roleLabel').classList.remove('show');
-      document.getElementById('cardHint').classList.remove('show');
-      document.getElementById('cardHint').textContent = '';
-      const btn = document.getElementById('newGameBtn');
-      btn.classList.remove('show');
-      btn.disabled = false;
-      btn.textContent = '🔄 NUEVA PARTIDA';
-      document.getElementById('readyCount').classList.remove('show');
-      document.getElementById('readyCount').textContent = '';
-    }
-    function renderPlayers(room) {
-      const players = Object.values(room.players || {});
-      totalPlayers = players.length;
-      ['waitCount','waitCountNH'].forEach(id => {
-        const el = document.getElementById(id);
-        if (el) el.textContent = totalPlayers;
-      });
-      ['playersList','playersListNH'].forEach(id => {
-        const list = document.getElementById(id);
-        if (!list) return;
-        list.innerHTML = '';
-        players.sort((a,b) => a.joinedAt - b.joinedAt).forEach((p, i) => {
-          const chip = document.createElement('div');
-          chip.className = 'player-chip';
-          chip.innerHTML = '<span class="dot"></span>Jugador ' + (i+1) + (i===0?' 👑':'');
-          list.appendChild(chip);
-        });
-      });
-      const btn = document.getElementById('startBtn');
-      if (btn) btn.disabled = totalPlayers < 2;
-      const note = document.getElementById('minNote');
-      if (note) note.style.display = totalPlayers >= 2 ? 'none' : 'block';
+      }, 700);
     }
 
     // --- Acciones del usuario ---
     window.handleCardTap = function() {
-      if (!cardAssigned) return; // carta no asignada todavía
-
-      if (cardFlipped) {
-        // Ya volteada → ir a ecogeo
-        window.location.href = 'https://www.ecogeo.es/';
-        return;
-      }
-      // Primer toque → voltear
-      cardFlipped = true;
-      const inner = document.getElementById('cardInner');
-      inner.classList.add('flipped');
-      setTimeout(() => {
-        document.getElementById('roleLabel').classList.add('show');
-        document.getElementById('cardHint').classList.add('show');
-        document.getElementById('cardHint').textContent = 'Toca para ir a ECOGEO';
-        showNewGameBtn();
-      }, 700);
-      try { sessionStorage.setItem('cardState', JSON.stringify({ round: currentRound })); } catch(e) {}
+      if (!revealed) return; // carta no revelada todavía, no hacer nada
+      window.location.href = 'https://www.ecogeo.es/';
     };
-
-    window.voteNewGame = async function() {
-      if (votedNewGame) return;
-      votedNewGame = true;
-      const btn = document.getElementById('newGameBtn');
-      btn.disabled = true;
-      btn.textContent = '✅ LISTO';
-      await update(ref(db, ROOM + '/newGameVotes'), { [myId]: true });
-      // El listener onValue se encarga del resto
-    };
-
-    async function launchNewRound() {
-      const snap = await get(ref(db, ROOM));
-      const room = snap.val();
-      const playerIds = Object.keys(room.players || {});
-      if (playerIds.length < 2) { launchGuard = false; return; }
-
-      // Verificar que los votos siguen siendo suficientes (doble check)
-      const voteCount = Object.keys(room.newGameVotes || {}).length;
-      if (voteCount < playerIds.length) { launchGuard = false; return; }
-
-      const impostorId = playerIds[Math.floor(Math.random() * playerIds.length)];
-      const civilCard = Math.floor(Math.random() * 9);
-      const assignments = {};
-      playerIds.forEach(id => { assignments[id] = id === impostorId ? 'impostor' : 'civil'; });
-      const nextRound = (room.round || 0) + 1;
-
-      await update(ref(db, ROOM), { started: true, civilCard, assignments, newGameVotes: null, round: nextRound });
-    }
 
     window.startGame = async function() {
+      if (!isHost) return;
       const snap = await get(ref(db, ROOM));
       const room = snap.val();
       const playerIds = Object.keys(room.players || {});
-      if (playerIds.length < 2) return;
+      if (playerIds.length < 1) return;
 
       const impostorId = playerIds[Math.floor(Math.random() * playerIds.length)];
       const civilCard = Math.floor(Math.random() * 9);
-      const assignments = {};
-      playerIds.forEach(id => { assignments[id] = id === impostorId ? 'impostor' : 'civil'; });
 
-      await update(ref(db, ROOM), { started: true, civilCard, assignments, newGameVotes: null, round: 1 });
+      await set(ref(db, ROOM), {
+        hostId: room.hostId,
+        createdAt: room.createdAt,
+        players: room.players,
+        civilCard,
+        impostorId,
+        revealed: true
+      });
     };
 
-    window.resetGame = async function() {
-      sessionStorage.removeItem('cardState');
-      // El que pulsa reset se convierte en el nuevo anfitrión
+    window.newGame = async function() {
+      if (!isHost) return;
+      const snap = await get(ref(db, ROOM));
+      const room = snap.val();
+
+      // Resetear para nueva partida manteniendo los jugadores
+      // El listener detectará revealed:false y reseteará la UI en todos los móviles
       await set(ref(db, ROOM), {
-        hostId: myId, started: false, createdAt: Date.now(),
-        players: { [myId]: { joinedAt: Date.now(), num: 1 } }
+        hostId: room.hostId,
+        createdAt: Date.now(),
+        players: room.players,
+        civilCard: Math.floor(Math.random() * 9),
+        revealed: false
       });
-      isHost = true;
     };
 
     init();
